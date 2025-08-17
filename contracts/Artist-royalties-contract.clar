@@ -1,15 +1,250 @@
 
 ;; Artist-royalties-contract
-;; <add a description here>
+;; NFT-based music and art licensing contract with automatic royalty payments to creators on resale
+;; This contract allows artists to mint NFTs with embedded royalty rates and ensures creators receive
+;; automatic payments whenever their work is resold in the secondary market.
 
-;; constants
-;;
+;; ==============================================
+;; CONSTANTS
+;; ==============================================
 
-;; data maps and vars
-;;
+;; Error codes
+(define-constant ERR-OWNER-ONLY (err u100))
+(define-constant ERR-NOT-TOKEN-OWNER (err u101))
+(define-constant ERR-TOKEN-NOT-FOUND (err u102))
+(define-constant ERR-INVALID-ROYALTY (err u103))
+(define-constant ERR-INSUFFICIENT-PAYMENT (err u104))
+(define-constant ERR-TOKEN-ALREADY-EXISTS (err u105))
+(define-constant ERR-INVALID-RECIPIENT (err u106))
+(define-constant ERR-TRANSFER-FAILED (err u107))
+(define-constant ERR-MINT-FAILED (err u108))
+(define-constant ERR-UNAUTHORIZED (err u109))
 
-;; private functions
-;;
+;; Maximum royalty percentage (10% = 1000 basis points)
+(define-constant MAX-ROYALTY-BPS u1000)
 
-;; public functions
-;;
+;; Basis points for percentage calculations (100% = 10000 basis points)
+(define-constant BPS-DENOMINATOR u10000)
+
+;; Contract owner (deployer)
+(define-constant CONTRACT-OWNER tx-sender)
+
+;; ==============================================
+;; NFT DEFINITION
+;; ==============================================
+
+;; Define the main NFT asset for art and music
+(define-non-fungible-token artist-nft uint)
+
+;; ==============================================
+;; DATA MAPS AND VARIABLES
+;; ==============================================
+
+;; Map to store token metadata and creator information
+(define-map token-metadata
+  { token-id: uint }
+  {
+    creator: principal,
+    title: (string-ascii 64),
+    description: (string-ascii 256),
+    media-url: (string-ascii 256),
+    royalty-bps: uint,
+    mint-timestamp: uint,
+    category: (string-ascii 32)
+  }
+)
+
+;; Map to store current token ownership
+(define-map token-owners
+  { token-id: uint }
+  { owner: principal }
+)
+
+;; Map to track licensing permissions and terms
+(define-map licensing-terms
+  { token-id: uint }
+  {
+    commercial-use: bool,
+    derivative-works: bool,
+    license-fee: uint,
+    license-duration: uint
+  }
+)
+
+;; Map to track active licenses
+(define-map active-licenses
+  { token-id: uint, licensee: principal }
+  {
+    license-start: uint,
+    license-end: uint,
+    fee-paid: uint,
+    terms-accepted: bool
+  }
+)
+
+;; Map to track total royalties earned by creators
+(define-map creator-earnings
+  { creator: principal }
+  { total-earned: uint }
+)
+
+;; Counter for generating unique token IDs
+(define-data-var next-token-id uint u1)
+
+;; Contract pause state for emergency stops
+(define-data-var contract-paused bool false)
+
+;; Total number of minted tokens
+(define-data-var total-supply uint u0)
+
+;; ==============================================
+;; PRIVATE FUNCTIONS
+;; ==============================================
+
+;; Check if contract is paused
+(define-private (contract-not-paused)
+  (not (var-get contract-paused))
+)
+
+;; Validate royalty basis points
+(define-private (valid-royalty-bps (royalty-bps uint))
+  (<= royalty-bps MAX-ROYALTY-BPS)
+)
+
+;; Get current block height as timestamp
+(define-private (get-current-timestamp)
+  block-height
+)
+
+;; Initialize creator earnings if not exists
+(define-private (init-creator-earnings (creator principal))
+  (if (is-none (map-get? creator-earnings { creator: creator }))
+    (map-set creator-earnings { creator: creator } { total-earned: u0 })
+    true
+  )
+)
+
+;; ==============================================
+;; PUBLIC FUNCTIONS - MINTING
+;; ==============================================
+
+;; Mint a new NFT with metadata and royalty settings
+;; Only the creator can mint their own NFT
+(define-public (mint-nft 
+  (title (string-ascii 64))
+  (description (string-ascii 256))
+  (media-url (string-ascii 256))
+  (category (string-ascii 32))
+  (royalty-bps uint)
+  (commercial-use bool)
+  (derivative-works bool)
+  (license-fee uint)
+  (license-duration uint)
+)
+  (let 
+    (
+      (token-id (var-get next-token-id))
+      (creator tx-sender)
+      (timestamp (get-current-timestamp))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Validate royalty percentage
+      (asserts! (valid-royalty-bps royalty-bps) ERR-INVALID-ROYALTY)
+      
+      ;; Attempt to mint the NFT
+      (try! (nft-mint? artist-nft token-id creator))
+      
+      ;; Store token metadata
+      (map-set token-metadata
+        { token-id: token-id }
+        {
+          creator: creator,
+          title: title,
+          description: description,
+          media-url: media-url,
+          royalty-bps: royalty-bps,
+          mint-timestamp: timestamp,
+          category: category
+        }
+      )
+      
+      ;; Store token ownership
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: creator }
+      )
+      
+      ;; Store licensing terms
+      (map-set licensing-terms
+        { token-id: token-id }
+        {
+          commercial-use: commercial-use,
+          derivative-works: derivative-works,
+          license-fee: license-fee,
+          license-duration: license-duration
+        }
+      )
+      
+      ;; Initialize creator earnings
+      (init-creator-earnings creator)
+      
+      ;; Update counters
+      (var-set next-token-id (+ token-id u1))
+      (var-set total-supply (+ (var-get total-supply) u1))
+      
+      ;; Return the minted token ID
+      (ok token-id)
+    )
+  )
+)
+
+;; Batch mint multiple NFTs for a single creator
+(define-public (batch-mint-nfts 
+  (nft-data (list 10 {
+    title: (string-ascii 64),
+    description: (string-ascii 256),
+    media-url: (string-ascii 256),
+    category: (string-ascii 32),
+    royalty-bps: uint,
+    commercial-use: bool,
+    derivative-works: bool,
+    license-fee: uint,
+    license-duration: uint
+  }))
+)
+  (begin
+    ;; Validate contract state
+    (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+    
+    ;; Map over the list and mint each NFT
+    (ok (map mint-nft-from-data nft-data))
+  )
+)
+
+;; Helper function for batch minting
+(define-private (mint-nft-from-data (data {
+  title: (string-ascii 64),
+  description: (string-ascii 256),
+  media-url: (string-ascii 256),
+  category: (string-ascii 32),
+  royalty-bps: uint,
+  commercial-use: bool,
+  derivative-works: bool,
+  license-fee: uint,
+  license-duration: uint
+}))
+  (mint-nft 
+    (get title data)
+    (get description data)
+    (get media-url data)
+    (get category data)
+    (get royalty-bps data)
+    (get commercial-use data)
+    (get derivative-works data)
+    (get license-fee data)
+    (get license-duration data)
+  )
+)
