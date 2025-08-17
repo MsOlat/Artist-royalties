@@ -381,15 +381,19 @@
 
 ;; Helper function for bulk transfers
 (define-private (execute-single-transfer (transfer-data { token-id: uint, recipient: principal, sale-price: uint }))
-  (if (> (get sale-price transfer-data) u0)
-    (transfer-with-royalty 
-      (get token-id transfer-data)
-      (get recipient transfer-data)
-      (get sale-price transfer-data)
-    )
-    (transfer-nft 
-      (get token-id transfer-data)
-      (get recipient transfer-data)
+  (let ((token-id (get token-id transfer-data)))
+    (if (> (get sale-price transfer-data) u0)
+      ;; For sales with price, use royalty transfer and return token-id
+      (match (transfer-with-royalty 
+        token-id
+        (get recipient transfer-data)
+        (get sale-price transfer-data)
+      )
+        transfer-result (ok token-id)
+        error-val (err error-val)
+      )
+      ;; For gifts, use direct transfer and return token-id
+      (transfer-nft token-id (get recipient transfer-data))
     )
   )
 )
