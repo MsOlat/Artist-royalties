@@ -248,3 +248,148 @@
     (get license-duration data)
   )
 )
+
+;; ==============================================
+;; PUBLIC FUNCTIONS - TRANSFERS & ROYALTIES
+;; ==============================================
+
+;; Transfer NFT with automatic royalty payment to creator
+(define-public (transfer-with-royalty 
+  (token-id uint)
+  (recipient principal)
+  (sale-price uint)
+)
+  (let 
+    (
+      (current-owner (unwrap! (map-get? token-owners { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (metadata (unwrap! (map-get? token-metadata { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (creator (get creator metadata))
+      (royalty-bps (get royalty-bps metadata))
+      (royalty-amount (/ (* sale-price royalty-bps) BPS-DENOMINATOR))
+      (seller-amount (- sale-price royalty-amount))
+      (current-earnings (default-to { total-earned: u0 } (map-get? creator-earnings { creator: creator })))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Verify sender is current owner
+      (asserts! (is-eq tx-sender (get owner current-owner)) ERR-NOT-TOKEN-OWNER)
+      
+      ;; Verify recipient is valid
+      (asserts! (not (is-eq recipient tx-sender)) ERR-INVALID-RECIPIENT)
+      
+      ;; Verify sufficient payment
+      (asserts! (>= sale-price royalty-amount) ERR-INSUFFICIENT-PAYMENT)
+      
+      ;; Transfer royalty to creator (if creator is different from seller)
+      (if (not (is-eq creator tx-sender))
+        (try! (stx-transfer? royalty-amount tx-sender creator))
+        true
+      )
+      
+      ;; Transfer remaining amount to seller (if different from buyer)
+      (if (and (> seller-amount u0) (not (is-eq tx-sender recipient)))
+        (try! (stx-transfer? seller-amount tx-sender tx-sender))
+        true
+      )
+      
+      ;; Transfer the NFT
+      (try! (nft-transfer? artist-nft token-id tx-sender recipient))
+      
+      ;; Update ownership record
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: recipient }
+      )
+      
+      ;; Update creator earnings
+      (map-set creator-earnings
+        { creator: creator }
+        { total-earned: (+ (get total-earned current-earnings) royalty-amount) }
+      )
+      
+      ;; Return success with transfer details
+      (ok {
+        token-id: token-id,
+        from: tx-sender,
+        to: recipient,
+        sale-price: sale-price,
+        royalty-paid: royalty-amount,
+        creator: creator
+      })
+    )
+  )
+)
+
+;; Direct transfer without sale (gift/inheritance)
+(define-public (transfer-nft (token-id uint) (recipient principal))
+  (let 
+    (
+      (current-owner (unwrap! (map-get? token-owners { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Verify sender is current owner
+      (asserts! (is-eq tx-sender (get owner current-owner)) ERR-NOT-TOKEN-OWNER)
+      
+      ;; Verify recipient is valid
+      (asserts! (not (is-eq recipient tx-sender)) ERR-INVALID-RECIPIENT)
+      
+      ;; Transfer the NFT
+      (try! (nft-transfer? artist-nft token-id tx-sender recipient))
+      
+      ;; Update ownership record
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: recipient }
+      )
+      
+      ;; Return success
+      (ok token-id)
+    )
+  )
+)
+
+;; Calculate royalty amount for a given sale price and token
+(define-read-only (calculate-royalty (token-id uint) (sale-price uint))
+  (let 
+    (
+      (metadata (map-get? token-metadata { token-id: token-id }))
+    )
+    (match metadata
+      data (ok (/ (* sale-price (get royalty-bps data)) BPS-DENOMINATOR))
+      ERR-TOKEN-NOT-FOUND
+    )
+  )
+)
+
+;; Bulk transfer function for multiple NFTs
+(define-public (bulk-transfer 
+  (transfers (list 20 { token-id: uint, recipient: principal, sale-price: uint }))
+)
+  (begin
+    ;; Validate contract state
+    (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+    
+    ;; Execute all transfers
+    (ok (map execute-single-transfer transfers))
+  )
+)
+
+;; Helper function for bulk transfers
+(define-private (execute-single-transfer (transfer-data { token-id: uint, recipient: principal, sale-price: uint }))
+  (if (> (get sale-price transfer-data) u0)
+    (transfer-with-royalty 
+      (get token-id transfer-data)
+      (get recipient transfer-data)
+      (get sale-price transfer-data)
+    )
+    (transfer-nft 
+      (get token-id transfer-data)
+      (get recipient transfer-data)
+    )
+  )
+)
