@@ -248,3 +248,370 @@
     (get license-duration data)
   )
 )
+
+;; ==============================================
+;; PUBLIC FUNCTIONS - TRANSFERS & ROYALTIES
+;; ==============================================
+
+;; Transfer NFT with automatic royalty payment to creator
+(define-public (transfer-with-royalty 
+  (token-id uint)
+  (recipient principal)
+  (sale-price uint)
+)
+  (let 
+    (
+      (current-owner (unwrap! (map-get? token-owners { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (metadata (unwrap! (map-get? token-metadata { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (creator (get creator metadata))
+      (royalty-bps (get royalty-bps metadata))
+      (royalty-amount (/ (* sale-price royalty-bps) BPS-DENOMINATOR))
+      (seller-amount (- sale-price royalty-amount))
+      (current-earnings (default-to { total-earned: u0 } (map-get? creator-earnings { creator: creator })))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Verify sender is current owner
+      (asserts! (is-eq tx-sender (get owner current-owner)) ERR-NOT-TOKEN-OWNER)
+      
+      ;; Verify recipient is valid
+      (asserts! (not (is-eq recipient tx-sender)) ERR-INVALID-RECIPIENT)
+      
+      ;; Verify sufficient payment
+      (asserts! (>= sale-price royalty-amount) ERR-INSUFFICIENT-PAYMENT)
+      
+      ;; Transfer royalty to creator (if creator is different from seller)
+      (if (not (is-eq creator tx-sender))
+        (try! (stx-transfer? royalty-amount tx-sender creator))
+        true
+      )
+      
+      ;; Transfer remaining amount to seller (if different from buyer)
+      (if (and (> seller-amount u0) (not (is-eq tx-sender recipient)))
+        (try! (stx-transfer? seller-amount tx-sender tx-sender))
+        true
+      )
+      
+      ;; Transfer the NFT
+      (try! (nft-transfer? artist-nft token-id tx-sender recipient))
+      
+      ;; Update ownership record
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: recipient }
+      )
+      
+      ;; Update creator earnings
+      (map-set creator-earnings
+        { creator: creator }
+        { total-earned: (+ (get total-earned current-earnings) royalty-amount) }
+      )
+      
+      ;; Return success with transfer details
+      (ok {
+        token-id: token-id,
+        from: tx-sender,
+        to: recipient,
+        sale-price: sale-price,
+        royalty-paid: royalty-amount,
+        creator: creator
+      })
+    )
+  )
+)
+
+;; Direct transfer without sale (gift/inheritance)
+(define-public (transfer-nft (token-id uint) (recipient principal))
+  (let 
+    (
+      (current-owner (unwrap! (map-get? token-owners { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Verify sender is current owner
+      (asserts! (is-eq tx-sender (get owner current-owner)) ERR-NOT-TOKEN-OWNER)
+      
+      ;; Verify recipient is valid
+      (asserts! (not (is-eq recipient tx-sender)) ERR-INVALID-RECIPIENT)
+      
+      ;; Transfer the NFT
+      (try! (nft-transfer? artist-nft token-id tx-sender recipient))
+      
+      ;; Update ownership record
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: recipient }
+      )
+      
+      ;; Return success
+      (ok token-id)
+    )
+  )
+)
+
+;; Calculate royalty amount for a given sale price and token
+(define-read-only (calculate-royalty (token-id uint) (sale-price uint))
+  (let 
+    (
+      (metadata (map-get? token-metadata { token-id: token-id }))
+    )
+    (match metadata
+      data (ok (/ (* sale-price (get royalty-bps data)) BPS-DENOMINATOR))
+      ERR-TOKEN-NOT-FOUND
+    )
+  )
+)
+
+;; Bulk transfer function for multiple NFTs
+(define-public (bulk-transfer 
+  (transfers (list 20 { token-id: uint, recipient: principal, sale-price: uint }))
+)
+  (begin
+    ;; Validate contract state
+    (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+    
+    ;; Execute all transfers
+    (ok (map execute-single-transfer transfers))
+  )
+)
+
+;; Helper function for bulk transfers
+(define-private (execute-single-transfer (transfer-data { token-id: uint, recipient: principal, sale-price: uint }))
+  (let ((token-id (get token-id transfer-data)))
+    (if (> (get sale-price transfer-data) u0)
+      ;; For sales with price, use royalty transfer and return token-id
+      (match (transfer-with-royalty 
+        token-id
+        (get recipient transfer-data)
+        (get sale-price transfer-data)
+      )
+        transfer-result (ok token-id)
+        error-val (err error-val)
+      )
+      ;; For gifts, use direct transfer and return token-id
+      (transfer-nft token-id (get recipient transfer-data))
+    )
+  )
+)
+
+;; ==============================================
+;; PUBLIC FUNCTIONS - LICENSING
+;; ==============================================
+
+;; Purchase a license to use an NFT
+(define-public (purchase-license (token-id uint) (license-duration uint))
+  (let 
+    (
+      (metadata (unwrap! (map-get? token-metadata { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (terms (unwrap! (map-get? licensing-terms { token-id: token-id }) ERR-TOKEN-NOT-FOUND))
+      (creator (get creator metadata))
+      (license-fee (get license-fee terms))
+      (max-duration (get license-duration terms))
+      (current-time (get-current-timestamp))
+      (license-end (+ current-time license-duration))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Validate license duration
+      (asserts! (<= license-duration max-duration) ERR-INVALID-ROYALTY)
+      
+      ;; Transfer license fee to creator
+      (if (> license-fee u0)
+        (try! (stx-transfer? license-fee tx-sender creator))
+        true
+      )
+      
+      ;; Record the license
+      (map-set active-licenses
+        { token-id: token-id, licensee: tx-sender }
+        {
+          license-start: current-time,
+          license-end: license-end,
+          fee-paid: license-fee,
+          terms-accepted: true
+        }
+      )
+      
+      ;; Update creator earnings
+      (let ((current-earnings (default-to { total-earned: u0 } (map-get? creator-earnings { creator: creator }))))
+        (map-set creator-earnings
+          { creator: creator }
+          { total-earned: (+ (get total-earned current-earnings) license-fee) }
+        )
+      )
+      
+      ;; Return license details
+      (ok {
+        token-id: token-id,
+        licensee: tx-sender,
+        license-start: current-time,
+        license-end: license-end,
+        fee-paid: license-fee
+      })
+    )
+  )
+)
+
+;; Check if a user has a valid license for an NFT
+(define-read-only (has-valid-license (token-id uint) (licensee principal))
+  (let 
+    (
+      (license (map-get? active-licenses { token-id: token-id, licensee: licensee }))
+      (current-time (get-current-timestamp))
+    )
+    (match license
+      license-data 
+        (and 
+          (get terms-accepted license-data)
+          (>= current-time (get license-start license-data))
+          (<= current-time (get license-end license-data))
+        )
+      false
+    )
+  )
+)
+
+;; ==============================================
+;; READ-ONLY FUNCTIONS - GETTERS
+;; ==============================================
+
+;; Get token metadata
+(define-read-only (get-token-metadata (token-id uint))
+  (map-get? token-metadata { token-id: token-id })
+)
+
+;; Get token owner
+(define-read-only (get-token-owner (token-id uint))
+  (map-get? token-owners { token-id: token-id })
+)
+
+;; Get licensing terms for a token
+(define-read-only (get-licensing-terms (token-id uint))
+  (map-get? licensing-terms { token-id: token-id })
+)
+
+;; Get creator total earnings
+(define-read-only (get-creator-earnings (creator principal))
+  (map-get? creator-earnings { creator: creator })
+)
+
+;; Get active license details
+(define-read-only (get-license-details (token-id uint) (licensee principal))
+  (map-get? active-licenses { token-id: token-id, licensee: licensee })
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  (ok {
+    total-supply: (var-get total-supply),
+    next-token-id: (var-get next-token-id),
+    contract-paused: (var-get contract-paused)
+  })
+)
+
+;; Get NFT URI (for metadata standards)
+(define-read-only (get-token-uri (token-id uint))
+  (let ((metadata (map-get? token-metadata { token-id: token-id })))
+    (match metadata
+      data (ok (some (get media-url data)))
+      (ok none)
+    )
+  )
+)
+
+;; ==============================================
+;; ADMIN FUNCTIONS
+;; ==============================================
+
+;; Pause/unpause contract (emergency function)
+(define-public (set-contract-paused (paused bool))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (var-set contract-paused paused)
+    (ok paused)
+  )
+)
+
+;; Update licensing terms for a token (creator only)
+(define-public (update-licensing-terms 
+  (token-id uint)
+  (commercial-use bool)
+  (derivative-works bool)
+  (license-fee uint)
+  (license-duration uint)
+)
+  (let ((metadata (unwrap! (map-get? token-metadata { token-id: token-id }) ERR-TOKEN-NOT-FOUND)))
+    (begin
+      ;; Only creator can update licensing terms
+      (asserts! (is-eq tx-sender (get creator metadata)) ERR-UNAUTHORIZED)
+      
+      ;; Update licensing terms
+      (map-set licensing-terms
+        { token-id: token-id }
+        {
+          commercial-use: commercial-use,
+          derivative-works: derivative-works,
+          license-fee: license-fee,
+          license-duration: license-duration
+        }
+      )
+      
+      (ok token-id)
+    )
+  )
+)
+
+;; ==============================================
+;; SIP-009 NFT TRAIT COMPLIANCE
+;; ==============================================
+
+;; Get last token ID
+(define-read-only (get-last-token-id)
+  (ok (- (var-get next-token-id) u1))
+)
+
+;; Get owner of a specific token (SIP-009 compliant)
+(define-read-only (get-owner (token-id uint))
+  (let ((owner-data (map-get? token-owners { token-id: token-id })))
+    (match owner-data
+      data (ok (some (get owner data)))
+      (ok none)
+    )
+  )
+)
+
+;; Transfer function for SIP-009 compliance
+(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender sender) ERR-UNAUTHORIZED)
+    (transfer-nft token-id recipient)
+  )
+)
+
+;; ==============================================
+;; CONTRACT INITIALIZATION
+;; ==============================================
+
+;; Initialize contract with deployment metadata
+(define-data-var contract-initialized bool false)
+
+(define-private (initialize-contract)
+  (begin
+    (var-set contract-initialized true)
+    (print {
+      event: "contract-deployed",
+      deployer: CONTRACT-OWNER,
+      timestamp: (get-current-timestamp),
+      version: "1.0.0"
+    })
+  )
+)
+
+;; Call initialization on deployment
+(initialize-contract)
