@@ -96,3 +96,155 @@
 
 ;; Total number of minted tokens
 (define-data-var total-supply uint u0)
+
+;; ==============================================
+;; PRIVATE FUNCTIONS
+;; ==============================================
+
+;; Check if contract is paused
+(define-private (contract-not-paused)
+  (not (var-get contract-paused))
+)
+
+;; Validate royalty basis points
+(define-private (valid-royalty-bps (royalty-bps uint))
+  (<= royalty-bps MAX-ROYALTY-BPS)
+)
+
+;; Get current block height as timestamp
+(define-private (get-current-timestamp)
+  block-height
+)
+
+;; Initialize creator earnings if not exists
+(define-private (init-creator-earnings (creator principal))
+  (if (is-none (map-get? creator-earnings { creator: creator }))
+    (map-set creator-earnings { creator: creator } { total-earned: u0 })
+    true
+  )
+)
+
+;; ==============================================
+;; PUBLIC FUNCTIONS - MINTING
+;; ==============================================
+
+;; Mint a new NFT with metadata and royalty settings
+;; Only the creator can mint their own NFT
+(define-public (mint-nft 
+  (title (string-ascii 64))
+  (description (string-ascii 256))
+  (media-url (string-ascii 256))
+  (category (string-ascii 32))
+  (royalty-bps uint)
+  (commercial-use bool)
+  (derivative-works bool)
+  (license-fee uint)
+  (license-duration uint)
+)
+  (let 
+    (
+      (token-id (var-get next-token-id))
+      (creator tx-sender)
+      (timestamp (get-current-timestamp))
+    )
+    (begin
+      ;; Validate contract state
+      (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+      
+      ;; Validate royalty percentage
+      (asserts! (valid-royalty-bps royalty-bps) ERR-INVALID-ROYALTY)
+      
+      ;; Attempt to mint the NFT
+      (try! (nft-mint? artist-nft token-id creator))
+      
+      ;; Store token metadata
+      (map-set token-metadata
+        { token-id: token-id }
+        {
+          creator: creator,
+          title: title,
+          description: description,
+          media-url: media-url,
+          royalty-bps: royalty-bps,
+          mint-timestamp: timestamp,
+          category: category
+        }
+      )
+      
+      ;; Store token ownership
+      (map-set token-owners
+        { token-id: token-id }
+        { owner: creator }
+      )
+      
+      ;; Store licensing terms
+      (map-set licensing-terms
+        { token-id: token-id }
+        {
+          commercial-use: commercial-use,
+          derivative-works: derivative-works,
+          license-fee: license-fee,
+          license-duration: license-duration
+        }
+      )
+      
+      ;; Initialize creator earnings
+      (init-creator-earnings creator)
+      
+      ;; Update counters
+      (var-set next-token-id (+ token-id u1))
+      (var-set total-supply (+ (var-get total-supply) u1))
+      
+      ;; Return the minted token ID
+      (ok token-id)
+    )
+  )
+)
+
+;; Batch mint multiple NFTs for a single creator
+(define-public (batch-mint-nfts 
+  (nft-data (list 10 {
+    title: (string-ascii 64),
+    description: (string-ascii 256),
+    media-url: (string-ascii 256),
+    category: (string-ascii 32),
+    royalty-bps: uint,
+    commercial-use: bool,
+    derivative-works: bool,
+    license-fee: uint,
+    license-duration: uint
+  }))
+)
+  (begin
+    ;; Validate contract state
+    (asserts! (contract-not-paused) ERR-UNAUTHORIZED)
+    
+    ;; Map over the list and mint each NFT
+    (ok (map mint-nft-from-data nft-data))
+  )
+)
+
+;; Helper function for batch minting
+(define-private (mint-nft-from-data (data {
+  title: (string-ascii 64),
+  description: (string-ascii 256),
+  media-url: (string-ascii 256),
+  category: (string-ascii 32),
+  royalty-bps: uint,
+  commercial-use: bool,
+  derivative-works: bool,
+  license-fee: uint,
+  license-duration: uint
+}))
+  (mint-nft 
+    (get title data)
+    (get description data)
+    (get media-url data)
+    (get category data)
+    (get royalty-bps data)
+    (get commercial-use data)
+    (get derivative-works data)
+    (get license-fee data)
+    (get license-duration data)
+  )
+)
