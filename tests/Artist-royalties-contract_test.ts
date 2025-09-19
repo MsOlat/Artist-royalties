@@ -1310,3 +1310,178 @@ Clarinet.test({
         hasLicenseQuery.result.expectOk().expectBool(true);
     },
 });
+
+// ===================================
+// ADMIN AND SIP-009 COMPLIANCE TESTS  
+// ===================================
+
+Clarinet.test({
+    name: "Contract pausing functionality works correctly",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get('deployer')!;
+        const wallet_1 = accounts.get('wallet_1')!;
+        
+        // Initially contract should not be paused
+        let pauseStatusQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'is-contract-paused',
+            [],
+            wallet_1.address
+        );
+        pauseStatusQuery.result.expectBool(false);
+        
+        // Deployer should be able to pause contract
+        let pauseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'set-contract-paused', [
+                types.bool(true)
+            ], deployer.address)
+        ]);
+        pauseBlock.receipts[0].result.expectOk().expectBool(true);
+        
+        // Verify contract is now paused
+        let pauseStatusQuery2 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'is-contract-paused',
+            [],
+            wallet_1.address
+        );
+        pauseStatusQuery2.result.expectBool(true);
+    },
+});
+
+Clarinet.test({
+    name: "SIP-009 get-last-token-id compliance",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        
+        // Initially should be 0
+        let lastTokenQuery1 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-last-token-id',
+            [],
+            wallet_1.address
+        );
+        lastTokenQuery1.result.expectOk().expectUint(0);
+        
+        // Mint a token
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("SIP-009 Test"),
+                types.ascii("Testing SIP-009 compliance"),
+                types.ascii("https://example.com/sip009.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], wallet_1.address)
+        ]);
+        mintBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Now should be 1
+        let lastTokenQuery2 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-last-token-id',
+            [],
+            wallet_1.address
+        );
+        lastTokenQuery2.result.expectOk().expectUint(1);
+    },
+});
+
+Clarinet.test({
+    name: "SIP-009 get-token-uri compliance",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        const testUri = "https://example.com/metadata.json";
+        
+        // Mint a token with specific URI
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("URI Test"),
+                types.ascii("Testing URI functionality"),
+                types.ascii(testUri),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], wallet_1.address)
+        ]);
+        mintBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Test get-token-uri
+        let uriQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-uri',
+            [types.uint(1)],
+            wallet_1.address
+        );
+        uriQuery.result.expectOk().expectSome().expectAscii(testUri);
+        
+        // Test non-existent token
+        let uriQuery2 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-uri',
+            [types.uint(999)],
+            wallet_1.address
+        );
+        uriQuery2.result.expectOk().expectNone();
+    },
+});
+
+Clarinet.test({
+    name: "Contract statistics and earnings tracking",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        
+        // Check initial contract stats
+        let statsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-contract-stats',
+            [],
+            wallet_1.address
+        );
+        let stats = statsQuery.result.expectOk().expectTuple() as any;
+        (stats['total-supply'] as any).expectUint(0);
+        (stats['next-token-id'] as any).expectUint(1);
+        
+        // Check initial creator earnings
+        let earningsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [types.principal(wallet_1.address)],
+            wallet_1.address
+        );
+        let earnings = earningsQuery.result.expectSome().expectTuple() as any;
+        (earnings['total-earned'] as any).expectUint(0);
+    },
+});
+
+Clarinet.test({
+    name: "Error handling for invalid operations",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        const wallet_2 = accounts.get('wallet_2')!;
+        
+        // Try to transfer non-existent token
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-nft', [
+                types.uint(999),
+                types.principal(wallet_2.address)
+            ], wallet_1.address)
+        ]);
+        transferBlock.receipts[0].result.expectErr().expectUint(102); // ERR-TOKEN-NOT-FOUND
+        
+        // Try to get metadata for non-existent token  
+        let metadataQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-metadata',
+            [types.uint(999)],
+            wallet_1.address
+        );
+        metadataQuery.result.expectNone();
+    },
+});
