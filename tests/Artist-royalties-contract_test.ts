@@ -63,12 +63,12 @@ Clarinet.test({
         );
         
         let metadata = metadataQuery.result.expectSome().expectTuple() as any;
-        metadata['title'].expectAscii("Music Track");
-        metadata['description'].expectAscii("An amazing music track");
-        metadata['media-url'].expectAscii("https://example.com/track.mp3");
-        metadata['category'].expectAscii("music");
-        metadata['royalty-bps'].expectUint(750);
-        metadata['creator'].expectPrincipal(wallet_1.address);
+        (metadata['title'] as any).expectAscii("Music Track");
+        (metadata['description'] as any).expectAscii("An amazing music track");
+        (metadata['media-url'] as any).expectAscii("https://example.com/track.mp3");
+        (metadata['category'] as any).expectAscii("music");
+        (metadata['royalty-bps'] as any).expectUint(750);
+        (metadata['creator'] as any).expectPrincipal(wallet_1.address);
     },
 });
 
@@ -143,8 +143,8 @@ Clarinet.test({
         );
         
         let statsData = stats.result.expectOk().expectTuple() as any;
-        statsData['total-supply'].expectUint(2);
-        statsData['next-token-id'].expectUint(3);
+        (statsData['total-supply'] as any).expectUint(2);
+        (statsData['next-token-id'] as any).expectUint(3);
     },
 });
 
@@ -176,10 +176,10 @@ Clarinet.test({
         );
         
         let terms = termsQuery.result.expectSome().expectTuple() as any;
-        terms['commercial-use'].expectBool(false);
-        terms['derivative-works'].expectBool(true);
-        terms['license-fee'].expectUint(5000);
-        terms['license-duration'].expectUint(90);
+        (terms['commercial-use'] as any).expectBool(false);
+        (terms['derivative-works'] as any).expectBool(true);
+        (terms['license-fee'] as any).expectUint(5000);
+        (terms['license-duration'] as any).expectUint(90);
     },
 });
 
@@ -211,7 +211,7 @@ Clarinet.test({
         );
         
         let earnings = earningsQuery.result.expectSome().expectTuple() as any;
-        earnings['total-earned'].expectUint(0);
+        (earnings['total-earned'] as any).expectUint(0);
     },
 });
 
@@ -287,7 +287,7 @@ Clarinet.test({
         );
         
         let ownerData = ownerQuery.result.expectSome().expectTuple() as any;
-        ownerData['owner'].expectPrincipal(wallet_1.address);
+        (ownerData['owner'] as any).expectPrincipal(wallet_1.address);
         
         // Also test SIP-009 compliant get-owner function
         let sip009OwnerQuery = chain.callReadOnlyFn(
@@ -498,7 +498,7 @@ Clarinet.test({
         );
         
         let ownerData = ownerQuery.result.expectSome().expectTuple() as any;
-        ownerData['owner'].expectPrincipal(wallet_2.address);
+        (ownerData['owner'] as any).expectPrincipal(wallet_2.address);
     },
 });
 
@@ -543,7 +543,7 @@ Clarinet.test({
         );
         
         let ownerData = ownerQuery.result.expectSome().expectTuple() as any;
-        ownerData['owner'].expectPrincipal(wallet_2.address);
+        (ownerData['owner'] as any).expectPrincipal(wallet_2.address);
         
         // Verify no earnings were added to creator (since no sale)
         let earningsQuery = chain.callReadOnlyFn(
@@ -868,5 +868,445 @@ Clarinet.test({
         
         assertEquals(transferBlock.receipts.length, 1);
         transferBlock.receipts[0].result.expectErr().expectUint(102); // ERR-TOKEN-NOT-FOUND
+    },
+});
+
+// ===================================
+// LICENSING SYSTEM TESTS
+// ===================================
+
+Clarinet.test({
+    name: "Successfully purchase license with payment",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const licensee = accounts.get('wallet_2')!;
+        
+        // Mint an NFT with licensing terms
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Licensed Artwork"),
+                types.ascii("Artwork with licensing"),
+                types.ascii("https://example.com/licensed.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500), // 5% royalty
+                types.bool(true), // commercial use allowed
+                types.bool(false), // no derivative works
+                types.uint(5000000), // 5000 STX license fee (in microSTX)
+                types.uint(365) // 365 block license duration
+            ], creator.address)
+        ]);
+        
+        // Purchase license
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1), // token-id
+                types.uint(180) // license duration (180 blocks)
+            ], licensee.address)
+        ]);
+        
+        assertEquals(licenseBlock.receipts.length, 1);
+        let licenseResult = licenseBlock.receipts[0].result.expectOk().expectTuple() as any;
+        licenseResult['token-id'].expectUint(1);
+        licenseResult['licensee'].expectPrincipal(licensee.address);
+        licenseResult['license-start'].expectUint(chain.blockHeight - 1);
+        licenseResult['license-end'].expectUint(chain.blockHeight - 1 + 180);
+        licenseResult['fee-paid'].expectUint(5000000);
+        
+        // Verify license is active
+        let hasLicenseQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), licensee.address],
+            licensee.address
+        );
+        
+        hasLicenseQuery.result.expectBool(true);
+        
+        // Verify creator earnings updated
+        let earningsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [creator.address],
+            creator.address
+        );
+        
+        let earnings = earningsQuery.result.expectSome().expectTuple() as any;
+        earnings['total-earned'].expectUint(5000000);
+    },
+});
+
+Clarinet.test({
+    name: "Free license (zero fee) works correctly", 
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const licensee = accounts.get('wallet_2')!;
+        
+        // Mint NFT with free licensing
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Free License Art"),
+                types.ascii("Free to license artwork"),
+                types.ascii("https://example.com/free.jpg"),
+                types.ascii("digital-art"),
+                types.uint(300),
+                types.bool(true),
+                types.bool(true),
+                types.uint(0), // Free license
+                types.uint(730)
+            ], creator.address)
+        ]);
+        
+        // Purchase free license
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(365)
+            ], licensee.address)
+        ]);
+        
+        assertEquals(licenseBlock.receipts.length, 1);
+        let licenseResult = licenseBlock.receipts[0].result.expectOk().expectTuple() as any;
+        licenseResult['fee-paid'].expectUint(0);
+        
+        // Verify license is valid
+        let hasLicenseQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), licensee.address],
+            licensee.address
+        );
+        
+        hasLicenseQuery.result.expectBool(true);
+        
+        // Verify no earnings for creator (free license)
+        let earningsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [creator.address],
+            creator.address
+        );
+        
+        let earnings = earningsQuery.result.expectSome().expectTuple() as any;
+        earnings['total-earned'].expectUint(0);
+    },
+});
+
+Clarinet.test({
+    name: "Reject license duration exceeding maximum",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const licensee = accounts.get('wallet_2')!;
+        
+        // Mint NFT with limited license duration
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Limited Duration"),
+                types.ascii("Limited license duration"),
+                types.ascii("https://example.com/limited.jpg"),
+                types.ascii("digital-art"),
+                types.uint(400),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000000), // 1000 STX
+                types.uint(100) // Maximum 100 blocks
+            ], creator.address)
+        ]);
+        
+        // Try to purchase license exceeding maximum duration
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(200) // Exceeds maximum of 100
+            ], licensee.address)
+        ]);
+        
+        assertEquals(licenseBlock.receipts.length, 1);
+        licenseBlock.receipts[0].result.expectErr().expectUint(103); // ERR-INVALID-ROYALTY (reused for duration validation)
+    },
+});
+
+Clarinet.test({
+    name: "License details are stored and retrieved correctly",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const licensee = accounts.get('wallet_2')!;
+        
+        // Mint NFT and purchase license
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("License Details Test"),
+                types.ascii("Testing license details"),
+                types.ascii("https://example.com/details.jpg"),
+                types.ascii("digital-art"),
+                types.uint(600),
+                types.bool(true),
+                types.bool(true),
+                types.uint(2000000), // 2000 STX
+                types.uint(500)
+            ], creator.address)
+        ]);
+        
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(250)
+            ], licensee.address)
+        ]);
+        
+        // Get license details
+        let licenseDetailsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-license-details',
+            [types.uint(1), licensee.address],
+            creator.address
+        );
+        
+        let licenseDetails = licenseDetailsQuery.result.expectSome().expectTuple() as any;
+        licenseDetails['license-start'].expectUint(chain.blockHeight - 1);
+        licenseDetails['license-end'].expectUint(chain.blockHeight - 1 + 250);
+        licenseDetails['fee-paid'].expectUint(2000000);
+        licenseDetails['terms-accepted'].expectBool(true);
+    },
+});
+
+Clarinet.test({
+    name: "Multiple users can license the same NFT",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const licensee1 = accounts.get('wallet_2')!;
+        const licensee2 = accounts.get('wallet_3')!;
+        
+        // Mint NFT
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Multi-License"),
+                types.ascii("Multiple licensees allowed"),
+                types.ascii("https://example.com/multi.jpg"),
+                types.ascii("digital-art"),
+                types.uint(800),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1500000), // 1500 STX
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Both users purchase licenses
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(180)
+            ], licensee1.address),
+            
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(365)
+            ], licensee2.address)
+        ]);
+        
+        assertEquals(licenseBlock.receipts.length, 2);
+        licenseBlock.receipts[0].result.expectOk();
+        licenseBlock.receipts[1].result.expectOk();
+        
+        // Verify both have valid licenses
+        let license1Query = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), licensee1.address],
+            licensee1.address
+        );
+        
+        let license2Query = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), licensee2.address],
+            licensee2.address
+        );
+        
+        license1Query.result.expectBool(true);
+        license2Query.result.expectBool(true);
+        
+        // Verify creator earned from both licenses
+        let earningsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [creator.address],
+            creator.address
+        );
+        
+        let earnings = earningsQuery.result.expectSome().expectTuple() as any;
+        earnings['total-earned'].expectUint(3000000); // 1500 + 1500
+    },
+});
+
+Clarinet.test({
+    name: "Creator can update licensing terms",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const nonCreator = accounts.get('wallet_2')!;
+        
+        // Mint NFT
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Updatable Terms"),
+                types.ascii("Terms can be updated"),
+                types.ascii("https://example.com/updatable.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(false), // Initially no commercial use
+                types.bool(false), // Initially no derivatives
+                types.uint(1000000), // 1000 STX
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Update licensing terms
+        let updateBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'update-licensing-terms', [
+                types.uint(1),
+                types.bool(true), // Allow commercial use
+                types.bool(true), // Allow derivatives
+                types.uint(2000000), // 2000 STX (increased fee)
+                types.uint(730) // 2 years
+            ], creator.address)
+        ]);
+        
+        assertEquals(updateBlock.receipts.length, 1);
+        updateBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Verify updated terms
+        let termsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-licensing-terms',
+            [types.uint(1)],
+            creator.address
+        );
+        
+        let terms = termsQuery.result.expectSome().expectTuple() as any;
+        terms['commercial-use'].expectBool(true);
+        terms['derivative-works'].expectBool(true);
+        terms['license-fee'].expectUint(2000000);
+        terms['license-duration'].expectUint(730);
+        
+        // Try update from non-creator (should fail)
+        let unauthorizedUpdateBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'update-licensing-terms', [
+                types.uint(1),
+                types.bool(false),
+                types.bool(false),
+                types.uint(500000),
+                types.uint(100)
+            ], nonCreator.address)
+        ]);
+        
+        assertEquals(unauthorizedUpdateBlock.receipts.length, 1);
+        unauthorizedUpdateBlock.receipts[0].result.expectErr().expectUint(109); // ERR-UNAUTHORIZED
+    },
+});
+
+Clarinet.test({
+    name: "License for non-existent token fails",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const licensee = accounts.get('wallet_1')!;
+        
+        // Try to license non-existent token
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(999), // Non-existent token
+                types.uint(180)
+            ], licensee.address)
+        ]);
+        
+        assertEquals(licenseBlock.receipts.length, 1);
+        licenseBlock.receipts[0].result.expectErr().expectUint(102); // ERR-TOKEN-NOT-FOUND
+    },
+});
+
+Clarinet.test({
+    name: "Check license validation for unlicensed user",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        const wallet_2 = accounts.get('wallet_2')!;
+        
+        // Mint NFT
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Unlicensed Check"),
+                types.ascii("Check unlicensed user"),
+                types.ascii("https://example.com/unlicensed.jpg"),
+                types.ascii("digital-art"),
+                types.uint(400),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000000),
+                types.uint(365)
+            ], wallet_1.address)
+        ]);
+        
+        // Check if unlicensed user has valid license (should be false)
+        let hasLicenseQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), types.principal(wallet_2.address)],
+            wallet_2.address
+        );
+        
+        hasLicenseQuery.result.expectOk().expectBool(false);
+        
+        // Check license details for unlicensed user (should be none)
+        let licenseDetailsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-license-details',
+            [types.uint(1), types.principal(wallet_2.address)],
+            wallet_2.address
+        );
+        
+        licenseDetailsQuery.result.expectOk().expectNone();
+    },
+});
+
+// ===================================  
+// ADDITIONAL LICENSING TESTS
+// ===================================
+
+Clarinet.test({
+    name: "Successfully purchase paid license",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        const wallet_2 = accounts.get('wallet_2')!;
+        
+        // Mint NFT with paid licensing
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Paid License"),
+                types.ascii("Test paid licensing"),
+                types.ascii("https://example.com/paid.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(false), // not commercial use
+                types.bool(true),  // derivative works allowed
+                types.uint(100000), // 100 STX fee
+                types.uint(90)     // 90 days max
+            ], wallet_1.address)
+        ]);
+        mintBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Purchase license for 30 days
+        let licenseBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'purchase-license', [
+                types.uint(1),
+                types.uint(30)
+            ], wallet_2.address)
+        ]);
+        licenseBlock.receipts[0].result.expectOk().expectBool(true);
+        
+        // Verify license is valid
+        let hasLicenseQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'has-valid-license',
+            [types.uint(1), types.principal(wallet_2.address)],
+            wallet_1.address
+        );
+        hasLicenseQuery.result.expectOk().expectBool(true);
     },
 });
