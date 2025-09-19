@@ -443,3 +443,430 @@ Clarinet.test({
         uriQuery2.result.expectOk().expectNone();
     },
 });
+
+// ===================================
+// TRANSFER AND ROYALTY PAYMENT TESTS
+// ===================================
+
+Clarinet.test({
+    name: "Successfully transfer NFT with royalty payment",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!; // Creator
+        const wallet_2 = accounts.get('wallet_2')!; // Buyer
+        
+        // First mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Transfer Test"),
+                types.ascii("Testing transfers with royalty"),
+                types.ascii("https://example.com/transfer.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500), // 5% royalty
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], wallet_1.address)
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Transfer the NFT with sale price
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-with-royalty', [
+                types.uint(1), // token-id
+                types.principal(wallet_2.address), // recipient
+                types.uint(1000000) // sale-price (1000 STX in microSTX)
+            ], wallet_1.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        let transferResult = transferBlock.receipts[0].result.expectOk().expectTuple() as any;
+        transferResult['token-id'].expectUint(1);
+        transferResult['from'].expectPrincipal(wallet_1.address);
+        transferResult['to'].expectPrincipal(wallet_2.address);
+        transferResult['sale-price'].expectUint(1000000);
+        transferResult['royalty-paid'].expectUint(50000); // 5% of 1000000
+        transferResult['creator'].expectPrincipal(wallet_1.address);
+        
+        // Verify ownership changed
+        let ownerQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-owner',
+            [types.uint(1)],
+            wallet_2.address
+        );
+        
+        let ownerData = ownerQuery.result.expectSome().expectTuple() as any;
+        ownerData['owner'].expectPrincipal(wallet_2.address);
+    },
+});
+
+Clarinet.test({
+    name: "Direct transfer without sale works correctly",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!; // Creator
+        const wallet_2 = accounts.get('wallet_2')!; // Recipient
+        
+        // First mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Gift Test"),
+                types.ascii("Testing gift transfers"),
+                types.ascii("https://example.com/gift.jpg"),
+                types.ascii("digital-art"),
+                types.uint(750), // 7.5% royalty
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], wallet_1.address)
+        ]);
+        
+        // Direct transfer without sale
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-nft', [
+                types.uint(1), // token-id
+                types.principal(wallet_2.address) // recipient
+            ], wallet_1.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Verify ownership changed
+        let ownerQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-owner',
+            [types.uint(1)],
+            wallet_2.address
+        );
+        
+        let ownerData = ownerQuery.result.expectSome().expectTuple() as any;
+        ownerData['owner'].expectPrincipal(wallet_2.address);
+        
+        // Verify no earnings were added to creator (since no sale)
+        let earningsQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [wallet_1.address],
+            wallet_1.address
+        );
+        
+        let earnings = earningsQuery.result.expectSome().expectTuple() as any;
+        earnings['total-earned'].expectUint(0);
+    },
+});
+
+Clarinet.test({
+    name: "Creator earnings update correctly with royalty payments",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const buyer1 = accounts.get('wallet_2')!;
+        const buyer2 = accounts.get('wallet_3')!;
+        
+        // Mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Earnings Test"),
+                types.ascii("Testing creator earnings"),
+                types.ascii("https://example.com/earnings.jpg"),
+                types.ascii("digital-art"),
+                types.uint(600), // 6% royalty
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // First sale: creator to buyer1
+        let sale1Block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-with-royalty', [
+                types.uint(1),
+                types.principal(buyer1.address),
+                types.uint(1000000) // 1000 STX
+            ], creator.address)
+        ]);
+        
+        // Check creator earnings after first sale (should be 60 STX = 60000 microSTX)
+        let earnings1 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [creator.address],
+            creator.address
+        );
+        
+        let earningsData1 = earnings1.result.expectSome().expectTuple() as any;
+        earningsData1['total-earned'].expectUint(60000);
+        
+        // Second sale: buyer1 to buyer2
+        let sale2Block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-with-royalty', [
+                types.uint(1),
+                types.principal(buyer2.address),
+                types.uint(2000000) // 2000 STX
+            ], buyer1.address)
+        ]);
+        
+        // Check creator earnings after second sale (should be 60 + 120 = 180 STX = 180000 microSTX)
+        let earnings2 = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-creator-earnings',
+            [creator.address],
+            creator.address
+        );
+        
+        let earningsData2 = earnings2.result.expectSome().expectTuple() as any;
+        earningsData2['total-earned'].expectUint(180000);
+    },
+});
+
+Clarinet.test({
+    name: "Reject transfer from non-owner",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const nonOwner = accounts.get('wallet_2')!;
+        const recipient = accounts.get('wallet_3')!;
+        
+        // Mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Owner Test"),
+                types.ascii("Testing ownership validation"),
+                types.ascii("https://example.com/owner-test.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Try to transfer from non-owner
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-with-royalty', [
+                types.uint(1),
+                types.principal(recipient.address),
+                types.uint(1000000)
+            ], nonOwner.address) // Non-owner trying to transfer
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectErr().expectUint(101); // ERR-NOT-TOKEN-OWNER
+    },
+});
+
+Clarinet.test({
+    name: "Reject transfer to self",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        
+        // Mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Self Transfer Test"),
+                types.ascii("Testing self transfer rejection"),
+                types.ascii("https://example.com/self.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Try to transfer to self
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-nft', [
+                types.uint(1),
+                types.principal(creator.address) // Same as sender
+            ], creator.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectErr().expectUint(106); // ERR-INVALID-RECIPIENT
+    },
+});
+
+Clarinet.test({
+    name: "Bulk transfer works correctly",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const buyer1 = accounts.get('wallet_2')!;
+        const buyer2 = accounts.get('wallet_3')!;
+        
+        // Mint multiple NFTs
+        let mintBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Bulk Test 1"),
+                types.ascii("First bulk transfer test"),
+                types.ascii("https://example.com/bulk1.jpg"),
+                types.ascii("digital-art"),
+                types.uint(400),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address),
+            
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("Bulk Test 2"),
+                types.ascii("Second bulk transfer test"),
+                types.ascii("https://example.com/bulk2.jpg"),
+                types.ascii("photography"),
+                types.uint(600),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Bulk transfer
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'bulk-transfer', [
+                types.list([
+                    types.tuple({
+                        'token-id': types.uint(1),
+                        'recipient': types.principal(buyer1.address),
+                        'sale-price': types.uint(1000000) // With sale price
+                    }),
+                    types.tuple({
+                        'token-id': types.uint(2),
+                        'recipient': types.principal(buyer2.address),
+                        'sale-price': types.uint(0) // Without sale price (gift)
+                    })
+                ])
+            ], creator.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectOk();
+        
+        // Verify first transfer (with royalty)
+        let owner1Query = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-owner',
+            [types.uint(1)],
+            buyer1.address
+        );
+        
+        let owner1Data = owner1Query.result.expectSome().expectTuple() as any;
+        owner1Data['owner'].expectPrincipal(buyer1.address);
+        
+        // Verify second transfer (gift)
+        let owner2Query = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-token-owner',
+            [types.uint(2)],
+            buyer2.address
+        );
+        
+        let owner2Data = owner2Query.result.expectSome().expectTuple() as any;
+        owner2Data['owner'].expectPrincipal(buyer2.address);
+    },
+});
+
+Clarinet.test({
+    name: "SIP-009 transfer function works correctly",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const recipient = accounts.get('wallet_2')!;
+        
+        // Mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("SIP-009 Test"),
+                types.ascii("Testing SIP-009 compliance"),
+                types.ascii("https://example.com/sip009.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Use SIP-009 transfer function
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer', [
+                types.uint(1), // token-id
+                types.principal(creator.address), // sender (must match tx-sender)
+                types.principal(recipient.address) // recipient
+            ], creator.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectOk().expectUint(1);
+        
+        // Verify ownership changed
+        let ownerQuery = chain.callReadOnlyFn(
+            'Artist-royalties-contract',
+            'get-owner',
+            [types.uint(1)],
+            recipient.address
+        );
+        
+        ownerQuery.result.expectOk().expectSome().expectPrincipal(recipient.address);
+    },
+});
+
+Clarinet.test({
+    name: "Reject SIP-009 transfer with wrong sender",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get('wallet_1')!;
+        const nonOwner = accounts.get('wallet_2')!;
+        const recipient = accounts.get('wallet_3')!;
+        
+        // Mint an NFT
+        let block = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'mint-nft', [
+                types.ascii("SIP-009 Auth Test"),
+                types.ascii("Testing SIP-009 auth"),
+                types.ascii("https://example.com/sip009-auth.jpg"),
+                types.ascii("digital-art"),
+                types.uint(500),
+                types.bool(true),
+                types.bool(false),
+                types.uint(1000),
+                types.uint(365)
+            ], creator.address)
+        ]);
+        
+        // Try SIP-009 transfer with wrong sender parameter
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer', [
+                types.uint(1),
+                types.principal(creator.address), // sender parameter
+                types.principal(recipient.address)
+            ], nonOwner.address) // tx-sender different from sender parameter
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectErr().expectUint(109); // ERR-UNAUTHORIZED
+    },
+});
+
+Clarinet.test({
+    name: "Transfer non-existent token fails",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const wallet_1 = accounts.get('wallet_1')!;
+        const wallet_2 = accounts.get('wallet_2')!;
+        
+        // Try to transfer non-existent token
+        let transferBlock = chain.mineBlock([
+            Tx.contractCall('Artist-royalties-contract', 'transfer-with-royalty', [
+                types.uint(999), // Non-existent token
+                types.principal(wallet_2.address),
+                types.uint(1000000)
+            ], wallet_1.address)
+        ]);
+        
+        assertEquals(transferBlock.receipts.length, 1);
+        transferBlock.receipts[0].result.expectErr().expectUint(102); // ERR-TOKEN-NOT-FOUND
+    },
+});
